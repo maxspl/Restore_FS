@@ -61,6 +61,7 @@ For example, the default depth of 2 allows to submit this kind of input (here th
 │       │       │   │   ├── NTFSInfo_00000000_DiskInterface_0x625ad6bc5ad68c63_.csv
 │       │       │   │   ├── NTFSInfo_00000001_PhysicalDrive_1_Offset_122683392_.csv
 │       │       │   │   ├── NTFSInfo_00000002_PhysicalDrive_1_Offset_499569917952_.csv
+```
 
 ### Command-Line Arguments
 
