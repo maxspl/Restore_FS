@@ -27,6 +27,7 @@ In input directory can contain multiple endpoints DFIR ORC archives.
 
 This argument (default value is 2) is used to specify where is the parent directory containing all the DFIR ORC files from the NTFSInfo files path.
 
+```bash
 For example, the default depth of 2 allows to submit this kind of input (here the input dir is input_sample). It means it will scan ../.. from each directory containing containing NTFSInfo csv (extracted_files in this example):
 ├── input_sample
 │   └── extract_orc
