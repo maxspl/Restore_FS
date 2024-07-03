@@ -78,7 +78,7 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
                 concat_str([
                     lit(output),
                     col("ComputerName"),
-                    col("MountPoint").str().replace_all(lit("\\\\"), lit(""), false), 
+                    col("MountPoint").str().replace_all(lit(":\\\\"), lit(""), false), 
                     col("ParentName").str().extract(lit(r".(.*)"), 1).str().replace_all(lit("\\\\"), lit("/"), false), 
                     col("File")], "/", true)
                 .alias("restored_path")

@@ -66,8 +66,8 @@ For example, the default depth of 2 allows to submit this kind of input (here th
 
 ### Command-Line Arguments
 
-- `-i, --input`: Input file path (required)
-- `-o, --output`: Output file path (required)
+- `-i, --input`: Input directory path (required)
+- `-o, --output`: Output directory path (required)
 - `-d, --depth`: Optional scan depth for the parent directory (default is 2)
 - `--ntfs-info-pattern`: Optional pattern for NTFSInfo files (default is `^NTFSInfo.*csv$`)
 
@@ -75,3 +75,4 @@ For example, the default depth of 2 allows to submit this kind of input (here th
 
 ```bash
 ./Restore_FS -i /path/to/input -o /path/to/output 
+RUST_LOG=debug ./Restore_FS -i /path/to/input -o /path/to/output 
