@@ -83,6 +83,12 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
                     col("File")], "/", true)
                 .alias("restored_path")
             ])
+            .sort(
+                ["restored_path"],
+                SortMultipleOptions::default()
+                    .with_order_descending(true)
+                    .with_nulls_last(true),
+            )            
             .collect()?;
 
             if DEBUG_ENABLED {
@@ -120,7 +126,6 @@ fn restore_fs(df: DataFrame) -> Result<bool, Box<dyn std::error::Error>> {
         if let (Some(src), Some(dest)) = (source, destination) {
             let src_path = Path::new(src);
             let dest_path = Path::new(dest);
-
             // Create parent directories if they don't exist
             if let Some(parent) = dest_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
