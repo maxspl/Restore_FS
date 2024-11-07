@@ -273,10 +273,11 @@ fn build_dataframes_from_ntfs(matching_files: HashSet<PathBuf>, volstats_result:
     // Returns list of dataframes from each NTFSInfo file
     let mut ntfs_dataframes: Vec<DataFrame> = Vec::new();
     for file_path in &matching_files {
-        
+        debug!("Processing file : {}", file_path.display());
         // Open NTFSInfo csv
         let q = LazyCsvReader::new((file_path))
             .with_has_header(true)
+            .with_ignore_errors(true)
             .finish()?;
         let mut df_ntfsinfo = q.collect()?;
         df_ntfsinfo = df_ntfsinfo.clone().lazy().select([cols([
@@ -287,12 +288,10 @@ fn build_dataframes_from_ntfs(matching_files: HashSet<PathBuf>, volstats_result:
                                             "FullName",
                                             "FRN",
                                             "ParentFRN"])]).collect()?;
-        
         // Convert DataFrame columm
         let mut cols_to_convert = vec!["VolumeID", "ParentFRN", "FRN"];
         let mut df_ntfsinfo_transformed = from_strHex_to_int(&df_ntfsinfo, cols_to_convert);
         let mut df_ntfsinfo_transformed_cloned = df_ntfsinfo_transformed.unwrap().clone();
-
         // If volstats exists and loaded, try to map VolumeID with MountPoint
         if let Ok(volstats_df) = &volstats_result { 
             debug!("Volstats : {:?}", volstats_df);
