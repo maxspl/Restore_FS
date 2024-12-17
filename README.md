@@ -70,6 +70,8 @@ For example, the default depth of 2 allows to submit this kind of input (here th
 - `-o, --output`: Output directory path (required)
 - `-d, --depth`: Optional scan depth for the parent directory (default is 2)
 - `--ntfs-info-pattern`: Optional pattern for NTFSInfo files (default is `^NTFSInfo.*csv$`)
+- `-e,--endpoint_name`:  Optional: Endpoint Name. Usefull for offline ORC collection. Will replace hosntame in volstats.csv. Work only for single triage.
+
 
 ### Example Command
 

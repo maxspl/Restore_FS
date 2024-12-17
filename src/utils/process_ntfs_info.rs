@@ -26,7 +26,7 @@ pub fn find_ntfs_info(input: &str, ntfs_info_pattern: &str) -> Result<HashSet<Pa
     Ok(matching_dirs)
 }
 
-pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, output: &str) -> Result<HashSet<PathBuf>, Box<dyn std::error::Error>> {
+pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, output: &str, endpoint_name: &str) -> Result<HashSet<PathBuf>, Box<dyn std::error::Error>> {
     info!("Processing directory: {:?}", dir);
     let regex = Regex::new(ntfs_info_pattern).expect("Invalid regex pattern");
     let mut matching_files = HashSet::new();
@@ -77,7 +77,11 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
                 col("ParentName").str().replace_all(lit("\\\\"), lit("/"), false),
                 concat_str([
                     lit(output),
-                    col("ComputerName"),
+                    if endpoint_name.is_empty() {
+                        col("ComputerName")  // Use the original column if endpoint_name is not provided
+                    } else {
+                        lit(endpoint_name)   // Use the provided endpoint_name
+                    },
                     col("MountPoint").str().replace_all(lit(":\\\\"), lit(""), false), 
                     col("ParentName").str().extract(lit(r".(.*)"), 1).str().replace_all(lit("\\\\"), lit("/"), false), 
                     col("File")], "/", true)
