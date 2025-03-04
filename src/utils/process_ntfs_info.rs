@@ -130,6 +130,17 @@ fn restore_fs(df: DataFrame) -> Result<bool, Box<dyn std::error::Error>> {
         if let (Some(src), Some(dest)) = (source, destination) {
             let src_path = Path::new(src);
             let dest_path = Path::new(dest);
+
+            //Skip files in the dir exAttrs 
+            if let Some(parent) = src_path.parent() {
+                if let Some(parent_str) = parent.to_str() {
+                    if parent_str.ends_with("extAttrs") {
+                        debug!("Skipping file in 'extAttrs' directory: {:?}", src_path);
+                        continue; // Skip this file and move to the next one
+                    }
+                }
+            }
+
             // Create parent directories if they don't exist
             if let Some(parent) = dest_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
