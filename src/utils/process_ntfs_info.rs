@@ -243,17 +243,19 @@ fn build_dataframe_from_extracted_triage(path: &PathBuf) -> Result<DataFrame, wa
     Ok(scanned_files_df_transformed.unwrap())
 }
 
-fn find_volstats_path(base_dir: &PathBuf) -> Option<PathBuf> {
+fn find_volstats_paths(base_dir: &PathBuf) -> Vec<PathBuf> {
+    let mut volstats_paths: Vec<PathBuf> = Vec::new();
     for entry in WalkDir::new(base_dir) {
         if let Ok(e) = entry {
             if e.file_type().is_file()
                 && e.file_name().to_string_lossy().eq_ignore_ascii_case("volstats.csv")
             {
-                return Some(e.path().to_path_buf());
+                volstats_paths.push(e.path().to_path_buf());
             }
         }
     }
-    None
+    volstats_paths.sort();
+    volstats_paths
 }
 
 /// Build a DataFrame from volstats.csv if present.  The volume statistics file
@@ -261,21 +263,50 @@ fn find_volstats_path(base_dir: &PathBuf) -> Option<PathBuf> {
 /// (VolumeID and MountPoint) and convert the VolumeID from hex string to
 /// integer.  If the file does not exist, an error is returned.
 fn build_volstats_df(base_dir: &PathBuf) -> Result<DataFrame, Box<dyn std::error::Error>> {
-    let volstats_path = find_volstats_path(base_dir)
-        .ok_or_else(|| format!("volstats.csv not found under {:?}", base_dir))?;
+    let volstats_paths = find_volstats_paths(base_dir);
+    if volstats_paths.is_empty() {
+        return Err(format!("volstats.csv not found under {:?}", base_dir).into());
+    }
 
-    let q = LazyCsvReader::new(volstats_path)
-        .with_has_header(true)
-        .finish()?;
+    info!("Found {} volstats.csv file(s) under {:?}", volstats_paths.len(), base_dir);
+    for path in &volstats_paths {
+        info!("Using volstats candidate: {}", path.display());
+    }
 
-    let mut df = q.collect()?;
-    df = df.lazy().select([cols(["VolumeID", "MountPoint"])]).collect()?;
+    let mut merged: Option<DataFrame> = None;
+    for volstats_path in volstats_paths {
+        let q = LazyCsvReader::new(&volstats_path)
+            .with_has_header(true)
+            .finish()?;
 
+        let mut df = q.collect()?;
+        df = df.lazy().select([cols(["VolumeID", "MountPoint"])]).collect()?;
+
+        merged = Some(match merged {
+            Some(mut acc) => {
+                 acc.vstack_mut(&df)?;
+                acc
+            }
+            None => df,
+        });
+    }
+
+    let df = merged.ok_or("failed to aggregate volstats.csv files")?;
     let cols_to_convert = vec!["VolumeID"];
     let df_modified = from_strHex_to_int(&df, cols_to_convert)?;
-    Ok(df_modified)
-}
 
+    let mountpoint_non_empty = df_modified
+        .column("MountPoint")?
+        .str()?
+        .into_iter()
+        .map(|opt| matches!(opt, Some(v) if !v.trim().is_empty()))
+        .collect::<Vec<bool>>();
+
+    let mut df_ranked = df_modified.clone();
+    df_ranked.with_column(Series::new("has_mountpoint", mountpoint_non_empty))?;
+
+    Ok(df_ranked)
+}
 /// Convert a list of columns from hexadecimal strings (prefixed with 0x) into
 /// integers.  The returned DataFrame is a clone of the input but with the
 /// specified columns replaced by integer-typed columns.
