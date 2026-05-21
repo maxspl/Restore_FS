@@ -72,10 +72,12 @@ For example, the default depth of 2 allows to submit this kind of input (here th
 - `--ntfs-info-pattern`: Optional pattern for NTFSInfo (or GetThis if --use-getthis) files (default is `^NTFSInfo.*csv$`)
 - `-e,--endpoint_name`:  Optional: Endpoint Name. Usefull for offline ORC collection. Will replace hosntame in volstats.csv. Work only for single triage.
 - `--use-getthis`: Optional:  Use GetThis CSV files instead of NTFSInfo files to restore the filesystem structure
+- `--move`: Optional: Move restored files instead of copying them. Source files are removed only after a successful transfer. 
 
 
 ### Example Command
 
 ```bash
-./Restore_FS -i /path/to/input -o /path/to/output 
+./Restore_FS -i /path/to/input -o /path/to/output  
 RUST_LOG=debug ./Restore_FS -i /path/to/input -o /path/to/output 
+./Restore_FS -i /path/to/input -o /path/to/output --move

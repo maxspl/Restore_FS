@@ -16,6 +16,7 @@ fn main() {
     let mut ntfs_info_pattern = "^NTFSInfo.*csv$".to_string();  // Default value for ntfs_info_pattern
     let mut endpoint_name = String::new(); // Default empty hostname
     let mut use_getthis = false; // flag to toggle GetThis processing
+    let mut move_files = false; // flag to move files instead of copying them
 
     {
         // this block limits scope of borrows by ap.refer() method
@@ -41,6 +42,9 @@ fn main() {
         ap.refer(&mut use_getthis)
             .add_option(&["--use-getthis"], StoreTrue, "Use GetThis CSV files instead of NTFSInfo files to restore the filesystem structure");
 
+        ap.refer(&mut move_files)
+            .add_option(&["--move"], StoreTrue, "Move restored files instead of copying them. This removes source files after a successful transfer.");
+
         ap.parse_args_or_exit();
     }
     // If GetThis mode is enabled, override the default pattern so that find_ntfs_info searches GetThis CSVs
@@ -54,12 +58,13 @@ fn main() {
     info!("NTFS Info Pattern: {}", ntfs_info_pattern);
     info!("Offline hostname: {}", endpoint_name);
     info!("Use GetThis mode: {}", use_getthis);
+    info!("Move files: {}", move_files);
 
     let mut dirs_containing_ntfsinfo = find_ntfs_info(&input, &ntfs_info_pattern).unwrap();  // identify the directories contains NTFSInfo files
     info!("Directories containing matching ({:}) files : {:?}", ntfs_info_pattern, dirs_containing_ntfsinfo);
 
     for dir_containing_ntfsinfo in dirs_containing_ntfsinfo{
-        let result = process_ORC_triage(dir_containing_ntfsinfo, &ntfs_info_pattern, scan_depth, &output, &endpoint_name, use_getthis);
+        let result = process_ORC_triage(dir_containing_ntfsinfo, &ntfs_info_pattern, scan_depth, &output, &endpoint_name, use_getthis, move_files);
         match result {
             Ok(_) => {
                 info!("Filesystem structure successfuly restored");

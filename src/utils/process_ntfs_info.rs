@@ -1,6 +1,6 @@
 use walkdir::WalkDir;
 use regex::Regex;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use log::{debug, error, info, warn};
 use polars::prelude::*;
@@ -26,8 +26,9 @@ pub fn find_ntfs_info(input: &str, ntfs_info_pattern: &str) -> Result<HashSet<Pa
     Ok(matching_dirs)
 }
 
-pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, output: &str, endpoint_name: &str, use_getthis: bool) -> Result<HashSet<PathBuf>, Box<dyn std::error::Error>> {
+pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, output: &str, endpoint_name: &str, use_getthis: bool, move_files: bool) -> Result<HashSet<PathBuf>, Box<dyn std::error::Error>> {
     info!("Processing directory: {:?}", dir);
+    info!("Restore mode: {}", if move_files { "move" } else { "copy" });
     let regex = Regex::new(ntfs_info_pattern).expect("Invalid regex pattern");
     let mut matching_files = HashSet::new();
     for entry in WalkDir::new(dir.clone()) {
@@ -113,7 +114,7 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
                 debug!("Final df : {}", df_joined);
             }
 
-            let result = restore_fs(df_joined);
+            let result = restore_fs(df_joined, move_files);
             match result {
                 Ok(_) => {
                     debug!("Restored action successful.");
@@ -131,46 +132,136 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
     Ok(matching_files)
 }
 /// Restore the filesystem structure on disk.  For every source file path found
-/// in the joined DataFrame, copy it to its corresponding destination under
-/// restored_path.  Directories are created on demand.  Files residing in
+/// in the joined DataFrame, copy or move it to its corresponding destination
+/// under restored_path.  Directories are created on demand.  Files residing in
 /// extAttrs are skipped as a best-effort to avoid copying extended attribute
 /// files that are not part of the regular filesystem structure.
-fn restore_fs(df: DataFrame) -> Result<bool, Box<dyn std::error::Error>> {
-    // Return true if successfully restored the filesystem structure by copying files to new destination
+fn restore_fs(df: DataFrame, move_files: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+
+    // Return true if successfully restored the filesystem structure by copying
+    // or moving files to their new destination.
     let source_paths = df.column("file_path")?;
     let destination_paths = df.column("restored_path")?;
 
-    for (source, destination) in source_paths.str()?.into_iter().zip(destination_paths.str()?.into_iter()) {
-        if let (Some(src), Some(dest)) = (source, destination) {
-            let src_path = Path::new(src);
-            let dest_path = Path::new(dest);
+    // Collect valid source/destination pairs first.
+    // This allows us to detect duplicated source paths.
+    let files: Vec<(String, String)> = source_paths
+        .str()?
+        .into_iter()
+        .zip(destination_paths.str()?.into_iter())
+        .filter_map(|(source, destination)| match (source, destination) {
+            (Some(src), Some(dest)) => Some((src.to_string(), dest.to_string())),
+            _ => None,
+        })
+        .collect();
 
-            //Skip files in the dir exAttrs 
-            if let Some(parent) = src_path.parent() {
-                if let Some(parent_str) = parent.to_str() {
-                    if parent_str.ends_with("extAttrs") {
-                        debug!("Skipping file in 'extAttrs' directory: {:?}", src_path);
-                        continue; // Skip this file and move to the next one
-                    }
+    // Count how many times each source file is referenced.
+    // If the same source is used multiple times, we must copy it until the last
+    // occurrence, otherwise moving it too early would break later restores.
+    let mut remaining_sources: HashMap<String, usize> = HashMap::new();
+    for (src, _) in &files {
+        *remaining_sources.entry(src.clone()).or_insert(0) += 1;
+    }
+
+    for (src, dest) in files {
+        let src_path = Path::new(&src);
+        let dest_path = Path::new(&dest);
+
+        // Skip files in the dir extAttrs
+        if let Some(parent) = src_path.parent() {
+            if let Some(parent_str) = parent.to_str() {
+                if parent_str.ends_with("extAttrs") {
+                    debug!("Skipping file in 'extAttrs' directory: {:?}", src_path);
+                    continue;
                 }
             }
+        }
 
-            // Create parent directories if they don't exist
-            if let Some(parent) = dest_path.parent() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    debug!("Failed to create directory {:?}: {}", parent, e);
-                    continue; // Skip to the next file
+        // Create parent directories if they don't exist
+        if let Some(parent) = dest_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                debug!("Failed to create directory {:?}: {}", parent, e);
+                continue;
+            }
+        }
+
+        let remaining = remaining_sources.entry(src.clone()).or_insert(1);
+        *remaining -= 1;
+
+        let should_move = move_files && *remaining == 0;
+
+        if should_move {
+            // Try a real move first. This is cheap when source and destination
+            // are on the same filesystem.
+            if let Err(rename_err) = fs::rename(src_path, dest_path) {
+                debug!(
+                    "Failed to move file from {:?} to {:?} with rename: {}. Falling back to copy + delete.",
+                    src_path, dest_path, rename_err
+                );
+
+                if let Err(copy_err) = fs::copy(src_path, dest_path) {
+                    debug!(
+                        "Failed to copy file from {:?} to {:?}: {}",
+                        src_path, dest_path, copy_err
+                    );
+                    continue;
+                }
+
+                if let Err(remove_err) = fs::remove_file(src_path) {
+                    debug!(
+                        "Failed to remove source file after copy from {:?} to {:?}: {}",
+                        src_path, dest_path, remove_err
+                    );
+                    continue;
                 }
             }
-
-            // Copy the file
+        } else {
+            // Default behavior: copy the file.
+            // Also used for duplicated sources until the last occurrence.
             if let Err(e) = fs::copy(src_path, dest_path) {
-                debug!("Failed to copy file from {:?} to {:?}: {}", src_path, dest_path, e);
-                continue; // Skip to the next file
+                debug!(
+                    "Failed to copy file from {:?} to {:?}: {}",
+                    src_path, dest_path, e
+                );
+                continue;
             }
         }
     }
+
     Ok(true)
+}
+
+fn transfer_file(
+    src_path: &Path,
+    dest_path: &Path,
+    move_files: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if src_path == dest_path {
+        debug!(
+            "Skipping transfer because source and destination are identical: {:?}",
+            src_path
+        );
+        return Ok(());
+    }
+
+    if move_files {
+        match fs::rename(src_path, dest_path) {
+            Ok(_) => return Ok(()),
+            Err(rename_error) => {
+                warn!(
+                    "Failed to rename {:?} to {:?}: {}. Falling back to copy then delete.",
+                    src_path, dest_path, rename_error
+                );
+                fs::copy(src_path, dest_path)?;
+                fs::remove_file(src_path)?;
+                return Ok(());
+            }
+        }
+    }
+
+    fs::copy(src_path, dest_path)?;
+    Ok(())
 }
 
 /// Compute the ancestor of a given path at the specified depth.  Used to
