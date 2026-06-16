@@ -11,6 +11,7 @@ use std::fs;
 use std::path::Path;
 
 const DEBUG_ENABLED: bool = cfg!(debug_assertions);
+const LIVE_SNAPSHOT_ID: &str = "{00000000-0000-0000-0000-000000000000}";
 
 pub fn find_ntfs_info(input: &str, ntfs_info_pattern: &str) -> Result<HashSet<PathBuf>, walkdir::Error> {
     // Return directories containing NTFSInfo files
@@ -64,11 +65,13 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
             .lazy()
             .join(
                 files_extracted_df.clone().lazy(),
-                vec![col("VolumeID"), col("FRN"), col("ParentFRN")],
-                vec![col("VolumeID"), col("FRN"), col("ParentFRN")],
+                vec![col("VolumeID"), col("FRN"), col("ParentFRN"), col("SnapshotID")],
+                vec![col("VolumeID"), col("FRN"), col("ParentFRN"), col("SnapshotID")],
                 JoinArgs::new(JoinType::Inner),
             )
             .collect()?;
+            add_restored_file_column(&mut df_joined)?;
+
             // Build the restored_path column.  Use the provided endpoint_name to
             // override ComputerName when non-empty.
             // For GetThis we rely on the FullName-derived ParentName and File
@@ -95,7 +98,7 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
                                 .replace(lit(r"^\\\\"), lit(""), false)     // only drop leading '\'
                                 .str()
                                 .replace_all(lit("\\\\"), lit("/"), false), // then normalize slashes
-                            col("File")
+                            col("RestoredFile")
                         ],
                         "/",
                         true,
@@ -131,6 +134,87 @@ pub fn process_ORC_triage(dir: PathBuf, ntfs_info_pattern: &str, depth: i32, out
 
     Ok(matching_files)
 }
+
+fn normalize_snapshot_id(raw: Option<&str>) -> String {
+    let Some(value) = raw else {
+        return LIVE_SNAPSHOT_ID.to_string();
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("null")
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("n/a")
+    {
+        return LIVE_SNAPSHOT_ID.to_string();
+    }
+
+    let without_braces = trimmed.trim_start_matches('{').trim_end_matches('}').to_lowercase();
+    format!("{{{}}}", without_braces)
+}
+
+fn sanitize_snapshot_id_for_filename(snapshot_id: &str) -> String {
+    snapshot_id
+        .trim_matches('{')
+        .trim_matches('}')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn dataframe_has_column(df: &DataFrame, column_name: &str) -> bool {
+    df.get_column_names()
+        .iter()
+        .any(|name| *name == column_name)
+}
+
+fn ensure_snapshot_id_column(df: &mut DataFrame) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot_ids: Vec<String> = if dataframe_has_column(df, "SnapshotID") {
+        df.column("SnapshotID")?
+            .str()?
+            .into_iter()
+            .map(normalize_snapshot_id)
+            .collect()
+    } else {
+        vec![LIVE_SNAPSHOT_ID.to_string(); df.height()]
+    };
+
+    df.with_column(Series::new("SnapshotID", snapshot_ids))?;
+    Ok(())
+}
+
+fn add_restored_file_column(df: &mut DataFrame) -> Result<(), Box<dyn std::error::Error>> {
+    let files = df.column("File")?.str()?;
+    let snapshots = df.column("SnapshotID")?.str()?;
+
+    let restored_files: Vec<String> = files
+        .into_iter()
+        .zip(snapshots.into_iter())
+        .map(|(file, snapshot)| {
+            let file = file.unwrap_or("");
+            let snapshot_id = normalize_snapshot_id(snapshot);
+            if snapshot_id == LIVE_SNAPSHOT_ID {
+                file.to_string()
+            } else {
+                format!(
+                    "{}__{}",
+                    sanitize_snapshot_id_for_filename(&snapshot_id),
+                    file
+                )
+            }
+        })
+        .collect();
+
+    df.with_column(Series::new("RestoredFile", restored_files))?;
+    Ok(())
+}
+
 /// Restore the filesystem structure on disk.  For every source file path found
 /// in the joined DataFrame, copy or move it to its corresponding destination
 /// under restored_path.  Directories are created on demand.  Files residing in
@@ -292,11 +376,13 @@ fn build_dataframe_from_extracted_triage(path: &PathBuf) -> Result<DataFrame, wa
     let regex = Regex::new("^[a-fA-F0-9]+_[a-fA-F0-9]+_[a-fA-F0-9]+_\\w+").expect("Invalid regex pattern"); // Pattern match VolumeID_FRN_PARENTFRN
     // Regex pattern to capture VolumeID, ParentFRN, and FRN
     let regex_extract = Regex::new(r"^([a-zA-Z0-9]+)_([a-zA-Z0-9]+)_([a-zA-Z0-9]+)").expect("Invalid regex pattern");
+    let regex_snapshot = Regex::new(r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}").expect("Invalid snapshot regex pattern");
     let mut file_paths: Vec<String> = Vec::new();
     let mut file_names: Vec<String> = Vec::new();
     let mut volume_ids: Vec<String> = Vec::new();
     let mut parent_frns: Vec<String> = Vec::new();
     let mut frns: Vec<String> = Vec::new();
+    let mut snapshot_ids: Vec<String> = Vec::new();
     
     for entry in WalkDir::new(path) {
         let entry = entry?;
@@ -310,6 +396,11 @@ fn build_dataframe_from_extracted_triage(path: &PathBuf) -> Result<DataFrame, wa
                 volume_ids.push(format!("0x{}", caps.get(1).unwrap().as_str()));
                 parent_frns.push(format!("0x{}", caps.get(2).unwrap().as_str()));
                 frns.push(format!("0x{}", caps.get(3).unwrap().as_str()));
+                let snapshot_id = regex_snapshot
+                    .find(&file_name)
+                    .map(|m| normalize_snapshot_id(Some(m.as_str())))
+                    .unwrap_or_else(|| LIVE_SNAPSHOT_ID.to_string());
+                snapshot_ids.push(snapshot_id);
             }
         }
 
@@ -320,12 +411,14 @@ fn build_dataframe_from_extracted_triage(path: &PathBuf) -> Result<DataFrame, wa
     let volume_ids_series = Series::new("VolumeID", volume_ids);
     let parent_frns_series = Series::new("ParentFRN", parent_frns);
     let frns_series = Series::new("FRN", frns);
+    let snapshot_ids_series = Series::new("SnapshotID", snapshot_ids);
     let df = DataFrame::new(vec![
         file_paths_series, 
         file_names_series, 
         volume_ids_series, 
         parent_frns_series, 
-        frns_series
+        frns_series,
+        snapshot_ids_series
     ]);
     
     let scanned_files_df = df.unwrap().clone();
@@ -398,6 +491,24 @@ fn build_volstats_df(base_dir: &PathBuf) -> Result<DataFrame, Box<dyn std::error
 
     Ok(df_ranked)
 }
+
+/// Add a synthetic MountPoint when volstats.csv is missing.
+/// This keeps restoration possible by using the volume identifier as the
+/// top-level directory name, for example: volume_FE18FD1518FCCE21.
+fn add_mountpoint_from_volume_id(mut df: DataFrame) -> Result<DataFrame, Box<dyn std::error::Error>> {
+    let mountpoints: Vec<String> = df
+        .column("VolumeID")?
+        .u64()?
+        .into_iter()
+        .map(|opt| match opt {
+            Some(volume_id) => format!("volume_{:X}", volume_id),
+            None => "volume_unknown".to_string(),
+        })
+        .collect();
+
+    df.with_column(Series::new("MountPoint", mountpoints))?;
+    Ok(df)
+}
 /// Convert a list of columns from hexadecimal strings (prefixed with 0x) into
 /// integers.  The returned DataFrame is a clone of the input but with the
 /// specified columns replaced by integer-typed columns.
@@ -449,6 +560,7 @@ fn build_dataframes_from_ntfs(matching_files: HashSet<PathBuf>, volstats_result:
             .with_ignore_errors(true)
             .finish()?;
         let mut df_ntfsinfo = q.collect()?;
+        ensure_snapshot_id_column(&mut df_ntfsinfo)?;
     df_ntfsinfo = df_ntfsinfo
             .lazy()
             .select([cols([
@@ -459,6 +571,7 @@ fn build_dataframes_from_ntfs(matching_files: HashSet<PathBuf>, volstats_result:
                 "FullName",
                 "FRN",
                 "ParentFRN",
+                "SnapshotID",
             ])])
             .collect()?;
         // Fill missing VolumeID values by parsing the filename
@@ -498,7 +611,8 @@ fn build_dataframes_from_ntfs(matching_files: HashSet<PathBuf>, volstats_result:
                 )
                 .collect()?;
         } else if let Err(e) = &volstats_result {
-            error!("Error: {}", e);
+            warn!("{}; using VolumeID as MountPoint fallback", e);
+            df_transformed_cloned = add_mountpoint_from_volume_id(df_transformed_cloned)?;
         }
         ntfs_dataframes.push(df_transformed_cloned);
     }
@@ -524,6 +638,7 @@ fn build_dataframes_from_getthis(
             .with_ignore_errors(true)
             .finish()?;
         let mut df_get = q.collect()?;
+        ensure_snapshot_id_column(&mut df_get)?;
         // Trim to the columns we need.  Some GetThis files may not include all of
         // these columns, so missing columns will be filled with nulls by select().
         df_get = df_get
@@ -534,6 +649,7 @@ fn build_dataframes_from_getthis(
                 "ParentFRN",
                 "FRN",
                 "FullName",
+                "SnapshotID",
             ])])
             .collect()?;
         // Parse fallback VolumeID from the filename
@@ -604,7 +720,8 @@ fn build_dataframes_from_getthis(
                 )
                 .collect()?;
         } else if let Err(e) = &volstats_result {
-            error!("Error: {}", e);
+            warn!("{}; using VolumeID as MountPoint fallback", e);
+            df_transformed_cloned = add_mountpoint_from_volume_id(df_transformed_cloned)?;
         }
         dataframes.push(df_transformed_cloned);
     }
